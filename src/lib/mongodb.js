@@ -1,27 +1,71 @@
 // src/lib/mongodb.js
 import { MongoClient } from 'mongodb';
 
-const uri = process.env.MONGODB_URI; // Add your MongoDB connection string to .env.local
-const options = {};
-
-let client;
-let clientPromise;
-
 if (!process.env.MONGODB_URI) {
-  throw new Error('Please add your MongoDB URI to .env.local');
+  throw new Error('Please define the MONGODB_URI environment variable inside .env');
 }
 
-if (process.env.NODE_ENV === 'development') {
-  // In development mode, use a global variable to preserve the client across hot reloads
-  if (!global._mongoClientPromise) {
-    client = new MongoClient(uri, options);
-    global._mongoClientPromise = client.connect();
+// Use 'site' as the default database name if MONGODB_DB is not provided
+const dbName = process.env.MONGODB_DB || 'site';
+
+/**
+ * Global is used here to maintain a cached connection across hot reloads
+ * in development. This prevents connections growing exponentially
+ * during API Route usage.
+ */
+let cached = global.mongo;
+
+if (!cached) {
+  cached = global.mongo = { conn: null, promise: null };
+}
+
+async function connectToDatabase() {
+  if (cached.conn) {
+    return cached.conn;
   }
-  clientPromise = global._mongoClientPromise;
-} else {
-  // In production mode, create a new client
-  client = new MongoClient(uri, options);
-  clientPromise = client.connect();
+
+  if (!cached.promise) {
+    const opts = {
+      maxPoolSize: 10,
+      minPoolSize: 5,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      connectTimeoutMS: 10000,
+      retryWrites: true,
+      retryReads: true,
+      maxIdleTimeMS: 60000,
+      waitQueueTimeoutMS: 10000,
+      heartbeatFrequencyMS: 10000,
+    };
+
+    cached.promise = MongoClient.connect(process.env.MONGODB_URI, opts)
+      .then((client) => {
+        console.log('MongoDB connected successfully');
+        return {
+          client,
+          db: client.db(dbName),
+        };
+      })
+      .catch((error) => {
+        console.error('MongoDB connection error:', error);
+        cached.promise = null;
+        throw error;
+      });
+  }
+
+  try {
+    cached.conn = await cached.promise;
+  } catch (e) {
+    cached.promise = null;
+    throw e;
+  }
+
+  return cached.conn;
 }
 
+// Create a single instance of the client promise
+const clientPromise = connectToDatabase();
+
+// Export both the function and the promise
+export { connectToDatabase, clientPromise };
 export default clientPromise;
